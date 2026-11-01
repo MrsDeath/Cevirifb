@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Canlı Altyazı Çevirici ve Okuyucu</title>
+  <!-- Tesseract.js (OCR) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #121212; color: #fff; text-align: center; padding: 15px; }
+    h2 { margin-bottom: 15px; }
+    
+    .container {
+      position: relative;
+      width: 100%;
+      max-width: 640px;
+      margin: 0 auto;
+      border: 2px solid #333;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    video { width: 100%; display: block; }
+
+    /* İşaretleme Kutusu (Selection Box) */
+    #selectionBox {
+      position: absolute;
+      border: 2px dashed #00ff00;
+      background: rgba(0, 255, 0, 0.15);
+      cursor: move;
+      box-sizing: border-box;
+      top: 65%;
+      left: 10%;
+      width: 80%;
+      height: 25%;
+    }
+
+    .controls {
+      margin-top: 15px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    button, select {
+      padding: 10px 15px;
+      font-size: 14px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      background: #007bff;
+      color: #fff;
+    }
+
+    button:disabled { background: #555; }
+    select { background: #222; }
+
+    #resultBox {
+      margin-top: 20px;
+      max-width: 640px;
+      margin-left: auto;
+      margin-right: auto;
+      background: #1e1e1e;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: left;
+    }
+
+    .label { font-size: 12px; color: #aaa; margin-top: 5px; }
+    .text-output { font-size: 16px; margin-bottom: 10px; color: #00ffcc; }
+  </style>
+</head>
+<body>
+
+  <h2>Altyazı Çevirici & Okuyucu</h2>
+
+  <div class="container" id="videoContainer">
+    <video id="webcam" autoplay playsinline></video>
+    <div id="selectionBox"></div>
+  </div>
+
+  <div class="controls">
+    <select id="sourceLang">
+      <option value="eng">Kaynak Dil: İngilizce</option>
+      <option value="ger">Kaynak Dil: Almanca</option>
+      <option value="spa">Kaynak Dil: İspanyolca</option>
+      <option value="fra">Kaynak Dil: Fransızca</option>
+    </select>
+    <button id="startBtn">Kamerayı Başlat</button>
+    <button id="scanBtn" disabled>Taramayı Başlat (Sürekli)</button>
+  </div>
+
+  <div id="resultBox">
+    <div class="label">Algılanan Metin:</div>
+    <div class="text-output" id="detectedText">-</div>
+    <div class="label">Türkçe Çeviri:</div>
+    <div class="text-output" id="translatedText" style="color: #00ff00;">-</div>
+  </div>
+
+  <!-- İşleme için gizli canvas -->
+  <canvas id="cropCanvas" style="display:none;"></canvas>
+
+  <script>
+    const video = document.getElementById('webcam');
+    const selectionBox = document.getElementById('selectionBox');
+    const videoContainer = document.getElementById('videoContainer');
+    const startBtn = document.getElementById('startBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const sourceLangSelect = document.getElementById('sourceLang');
+    const detectedTextEl = document.getElementById('detectedText');
+    const translatedTextEl = document.getElementById('translatedText');
+    const cropCanvas = document.getElementById('cropCanvas');
+
+    let isScanning = false;
+    let lastSpokenText = "";
+
+    // 1. Kamerayı Başlat
+    startBtn.addEventListener('click', async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } 
+        });
+        video.srcObject = stream;
+        scanBtn.disabled = false;
+        startBtn.disabled = true;
+      } catch (err) {
+        alert("Kamera erişimi reddedildi veya bulunamadı: " + err.message);
+      }
+    });
+
+    // 2. Tarama Döngüsü
+    scanBtn.addEventListener('click', () => {
+      isScanning = !isScanning;
+      if (isScanning) {
+        scanBtn.innerText = "Taramayı Durdur";
+        scanLoop();
+      } else {
+        scanBtn.innerText = "Taramayı Başlat (Sürekli)";
+      }
+    });
+
+    async function scanLoop() {
+      if (!isScanning) return;
+
+      await processSubtitles();
+      
+      // 2 saniyede bir kare kontrol et (Performans dengesi için)
+      setTimeout(scanLoop, 2000);
+    }
+
+    // 3. Seçili Alanı Kırpma ve OCR Yapma
+    async function processSubtitles() {
+      if (video.videoWidth === 0) return;
+
+      const rect = selectionBox.getBoundingClientRect();
+      const containerRect = videoContainer.getBoundingClientRect();
+
+      // Video ölçekleme oranını hesapla
+      const scaleX = video.videoWidth / containerRect.width;
+      const scaleY = video.videoHeight / containerRect.height;
+
+      const cropX = (rect.left - containerRect.left) * scaleX;
+      const cropY = (rect.top - containerRect.top) * scaleY;
+      const cropWidth = rect.width * scaleX;
+      const cropHeight = rect.height * scaleY;
+
+      cropCanvas.width = cropWidth;
+      cropCanvas.height = cropHeight;
+
+      const ctx = cropCanvas.getContext('2d');
+      ctx.drawImage(video, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+
+      const lang = sourceLangSelect.value;
+
+      try {
+        // Tesseract OCR ile metin okuma
+        const worker = await Tesseract.createWorker(lang);
+        const ret = await worker.recognize(cropCanvas);
+        await worker.terminate();
+
+        const rawText = ret.data.text.trim().replace(/\n/g, " ");
+
+        if (rawText && rawText !== lastSpokenText) {
+          detectedTextEl.innerText = rawText;
+          
+          // Çeviri yap
+          const translated = await translateToTurkish(rawText, lang.substring(0, 2));
+          translatedTextEl.innerText = translated;
+
+          // Türkçe Seslendir
+          speakTurkish(translated);
+          lastSpokenText = rawText;
+        }
+      } catch (err) {
+        console.error("OCR Hatası:", err);
+      }
+    }
+
+    // 4. Çeviri Servisi (MyMemory Free API)
+    async function translateToTurkish(text, sourceLang) {
+      try {
+        const response = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sourceLang}|tr`);
+        const data = await response.json();
+        return data.responseData.translatedText || text;
+      } catch (err) {
+        console.error("Çeviri Hatası:", err);
+        return text;
+      }
+    }
+
+    // 5. Türkçe Seslendirme (Text-to-Speech)
+    function speakTurkish(text) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel(); // Önceki okumayı durdur
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'tr-TR';
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+      }
+    }
+  </script>
+</body>
+</html>
